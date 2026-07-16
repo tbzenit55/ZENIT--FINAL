@@ -1,0 +1,18 @@
+{
+  "name": "zenit-final",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": { "start": "node index.js" },
+  "engines": { "node": "22.x" },
+  "dependencies": {
+    "@whiskeysockets/baileys": "6.7.7",
+    "qrcode-terminal": "latest",
+    "pino": "latest",
+    "axios": "latest",
+    "yt-search": "latest",
+    "qrcode": "latest",
+    "express": "latest",
+    "fs-extra": "latest",
+    "node-cache": "latest"
+  }
+}
