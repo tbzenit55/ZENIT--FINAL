@@ -5,10 +5,12 @@ const fs = require('fs-extra');
 const express = require('express');
 const QRCode = require('qrcode');
 const axios = require('axios');
+const yts = require('yt-search');
 require('dotenv').config();
 
 const BOT_NAME = process.env.BOT_NAME || 'ZENIT X BOT';
 const OWNER_NAME = process.env.OWNER_NAME || 'ZENIT';
+const OWNER_NUMBER = (process.env.OWNER_NUMBER || '91xxxxxxxxxx') + '@s.whatsapp.net';
 const PREFIX = process.env.PREFIX || '.';
 const PORT = process.env.PORT || 8000;
 
@@ -17,7 +19,8 @@ const msgRetryCounterCache = new NodeCache();
 
 let currentQR = '';
 let connected = false;
-let sock = null;
+let sockInstance = null;
+let pairingInProgress = false;
 
 app.get('/', (req, res) => {
     res.send(`<!DOCTYPE html>
@@ -93,19 +96,29 @@ setInterval(ld,8000);setInterval(st,4000);ld();st();
 });
 
 app.get('/qr', (req, res) => res.json({ qr: currentQR || null }));
+
 app.get('/code', async (req, res) => {
     const phone = req.query.phone;
     if (!phone || phone.length < 10) return res.json({ error: 'Valid number required' });
-    if (!sock) return res.json({ error: 'Bot starting...' });
+    if (!sockInstance) return res.json({ error: 'Bot starting...' });
     if (!currentQR) return res.json({ error: 'QR not ready. Wait 10 seconds.' });
+    if (pairingInProgress) return res.json({ error: 'Another code being generated. Wait.' });
+    
+    pairingInProgress = true;
+    
     try {
-        const code = await sock.requestPairingCode(phone);
-        console.log('CODE:', code);
+        await new Promise(r => setTimeout(r, 2000));
+        const code = await sockInstance.requestPairingCode(phone);
+        console.log('PAIR CODE:', code, 'for', phone);
+        pairingInProgress = false;
         return res.json({ code });
     } catch(e) {
-        return res.json({ error: 'Failed. Refresh and wait for QR.' });
+        pairingInProgress = false;
+        console.error('Pair error:', e.message);
+        return res.json({ error: 'Failed. Make sure QR is visible, wait 15 seconds, then try.' });
     }
 });
+
 app.get('/status', (req, res) => res.json({ on: connected }));
 app.listen(PORT, () => console.log('Server:', PORT));
 
@@ -114,47 +127,59 @@ const users = new Set();
 async function start() {
     try {
         if (fs.existsSync('./session')) fs.removeSync('./session');
+        
         const { state, saveCreds } = await useMultiFileAuthState('./session');
         const { version } = await fetchLatestBaileysVersion();
-        console.log('v' + version);
+        console.log('Baileys v' + version);
         
-        sock = makeWASocket({
-            version: [2, 3000, 1015901307],
-            logger: pino({ level: 'silent' }),
+        sockInstance = makeWASocket({
+            version,
+            logger: pino({ level: 'fatal' }),
             printQRInTerminal: true,
-            auth: state,
-            browser: ['Chrome (Linux)', '', ''],
+            auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'fatal' })) },
+            browser: ['Ubuntu', 'Chrome', '20.0.0'],
             markOnlineOnConnect: true,
-            msgRetryCounterCache
+            msgRetryCounterCache,
+            syncFullHistory: false,
+            defaultQueryTimeoutMs: 120000
         });
         
-        sock.ev.on('connection.update', async (up) => {
+        sockInstance.ev.on('connection.update', async (up) => {
             const { connection, lastDisconnect, qr } = up;
-            if (qr) { currentQR = await QRCode.toDataURL(qr); console.log('QR Ready'); }
+            if (qr) { 
+                currentQR = await QRCode.toDataURL(qr); 
+                console.log('✅ QR Ready - Pair code ready to use');
+            }
             if (connection === 'close') {
                 connected = false; currentQR = '';
-                setTimeout(start, lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut ? 3000 : 2000);
-            } else if (connection === 'open') { connected = true; currentQR = ''; console.log('Connected!'); }
+                const code = lastDisconnect?.error?.output?.statusCode;
+                setTimeout(start, code !== DisconnectReason.loggedOut ? 3000 : 2000);
+            } else if (connection === 'open') { 
+                connected = true; currentQR = ''; 
+                console.log('✅ ZENIT X BOT CONNECTED!');
+            }
         });
         
-        sock.ev.on('creds.update', saveCreds);
+        sockInstance.ev.on('creds.update', saveCreds);
         
-        sock.ev.on('messages.upsert', async ({ messages }) => {
+        sockInstance.ev.on('messages.upsert', async ({ messages }) => {
             const msg = messages[0];
             if (!msg.message || msg.key.fromMe) return;
             const chat = msg.key.remoteJid; users.add(chat);
             const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
             if (text && text.startsWith(PREFIX)) {
                 const cmd = text.slice(1).split(' ')[0].toLowerCase();
-                if (cmd === 'ping') await sock.sendMessage(chat, { text: '🏓 Pong!' });
-                else if (cmd === 'menu') await sock.sendMessage(chat, { text: '🤖 ' + BOT_NAME + '\n.ping .alive .menu .truth .dare .joke .meme .waifu .neko' });
-                else if (cmd === 'alive') await sock.sendMessage(chat, { text: '🟢 ' + BOT_NAME + ' Online\nUsers: ' + users.size });
-                else if (cmd === 'truth') await sock.sendMessage(chat, { text: '🔮 ' + ['Fear?','Lie?','Crush?'][Math.floor(Math.random()*3)] });
-                else if (cmd === 'dare') await sock.sendMessage(chat, { text: '🎯 ' + ['Sing!','Selfie!','Dance!'][Math.floor(Math.random()*3)] });
-                else if (cmd === 'joke') { try { const r = await axios.get('https://v2.jokeapi.dev/joke/Any?type=single'); await sock.sendMessage(chat, { text: '😂 ' + r.data.joke }); } catch(e) {} }
-                else if (cmd === 'meme') { try { const r = await axios.get('https://meme-api.com/gimme'); await sock.sendMessage(chat, { image: { url: r.data.url }, caption: r.data.title }); } catch(e) {} }
-                else if (cmd === 'waifu') { try { const r = await axios.get('https://api.waifu.pics/sfw/waifu'); await sock.sendMessage(chat, { image: { url: r.data.url } }); } catch(e) {} }
-                else if (cmd === 'neko') { try { const r = await axios.get('https://api.waifu.pics/sfw/neko'); await sock.sendMessage(chat, { image: { url: r.data.url } }); } catch(e) {} }
+                const q = text.slice(cmd.length + 2);
+                if (cmd === 'ping') await sockInstance.sendMessage(chat, { text: '🏓 Pong!' });
+                else if (cmd === 'menu') await sockInstance.sendMessage(chat, { text: '🤖 ' + BOT_NAME + '\n👑 ' + OWNER_NAME + '\n\n.ping .alive .menu .truth .dare .joke .meme .waifu .neko .play' });
+                else if (cmd === 'alive') await sockInstance.sendMessage(chat, { text: '🟢 ' + BOT_NAME + ' Online\n👥 Users: ' + users.size });
+                else if (cmd === 'truth') await sockInstance.sendMessage(chat, { text: '🔮 ' + ['Biggest fear?','Ever lied?','First crush?','Secret talent?','Last cry?'][Math.floor(Math.random()*5)] });
+                else if (cmd === 'dare') await sockInstance.sendMessage(chat, { text: '🎯 ' + ['Sing a song!','Send selfie!','Do 10 pushups!','Post status!','Dance 30 sec!'][Math.floor(Math.random()*5)] });
+                else if (cmd === 'joke') { try { const r = await axios.get('https://v2.jokeapi.dev/joke/Any?type=single'); await sockInstance.sendMessage(chat, { text: '😂 ' + r.data.joke }); } catch(e) {} }
+                else if (cmd === 'meme') { try { const r = await axios.get('https://meme-api.com/gimme'); await sockInstance.sendMessage(chat, { image: { url: r.data.url }, caption: r.data.title }); } catch(e) {} }
+                else if (cmd === 'waifu') { try { const r = await axios.get('https://api.waifu.pics/sfw/waifu'); await sockInstance.sendMessage(chat, { image: { url: r.data.url }, caption: '💕' }); } catch(e) {} }
+                else if (cmd === 'neko') { try { const r = await axios.get('https://api.waifu.pics/sfw/neko'); await sockInstance.sendMessage(chat, { image: { url: r.data.url }, caption: '🐱' }); } catch(e) {} }
+                else if ((cmd === 'play' || cmd === 'song') && q) { try { const r = await yts(q); const v = r.videos[0]; if(v) await sockInstance.sendMessage(chat, { text: '🎵 ' + v.title + '\n⏱ ' + v.timestamp + '\n🔗 ' + v.url }); } catch(e) {} }
             }
         });
     } catch(e) { console.error(e); setTimeout(start, 5000); }
