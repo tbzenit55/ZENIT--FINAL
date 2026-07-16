@@ -13,6 +13,7 @@
     "qrcode": "latest",
     "express": "latest",
     "fs-extra": "latest",
-    "node-cache": "latest"
+    "node-cache": "latest",
+    "dotenv": "latest"
   }
 }
